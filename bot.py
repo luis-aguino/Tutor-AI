@@ -23,20 +23,11 @@ REGLAS:
 - Si el usuario comete un error, muestra la forma correcta con formato: Error -> Correcto.
 - Celebra los logros del usuario con entusiasmo.
 - Mantén las respuestas concisas (máximo 200 palabras) para no abrumar al usuario.
-
-TEMAS QUE PUEDES ENSEÑAR:
-- Vocabulario cotidiano
-- Gramatica basica y avanzada
-- Frases utiles para viajes, trabajo, etc.
-- Conversacion simulada
-- Verbos irregulares
-- Tiempos verbales
 """
 
 user_histories = {}
 
 
-# --- Servidor web para que Render no apague el servicio ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -44,7 +35,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot activo!")
 
     def log_message(self, format, *args):
-        pass  # Silencia los logs del servidor
+        pass
 
 
 def run_server():
@@ -53,7 +44,6 @@ def run_server():
     server.serve_forever()
 
 
-# --- Funciones del bot ---
 def send_message(chat_id, text):
     requests.post(f"{TELEGRAM_BASE}/sendMessage", json={
         "chat_id": chat_id,
@@ -75,10 +65,19 @@ def ask_gemini(history):
     }
     response = requests.post(GEMINI_URL, json=payload)
     data = response.json()
-    try:
+
+    # Mostrar respuesta completa en logs para diagnosticar
+    print(f"Gemini status: {response.status_code}")
+    print(f"Gemini response: {data}")
+
+    if "candidates" in data:
         return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception:
-        return "Lo siento, hubo un error. Por favor intenta de nuevo."
+    elif "error" in data:
+        error_msg = data["error"].get("message", "Error desconocido")
+        print(f"Error de Gemini: {error_msg}")
+        return f"Error de Gemini: {error_msg}"
+    else:
+        return "Respuesta inesperada de Gemini."
 
 
 def handle_update(update):
@@ -98,7 +97,6 @@ def handle_update(update):
         user_histories[user_id] = []
         send_message(chat_id,
             "Hola! Soy tu Tutor de Ingles AI\n\n"
-            "Estoy aqui para ayudarte a aprender ingles.\n\n"
             "Puedes:\n"
             "- Escribirme en espanol y te enseno como decirlo en ingles\n"
             "- Escribirme en ingles y te corrijo si hay errores\n"
@@ -109,17 +107,7 @@ def handle_update(update):
 
     if text == "/reset":
         user_histories[user_id] = []
-        send_message(chat_id, "Conversacion reiniciada! Que quieres aprender hoy?")
-        return
-
-    if text == "/help":
-        send_message(chat_id,
-            "Comandos disponibles:\n\n"
-            "/start - Iniciar el bot\n"
-            "/reset - Borrar historial\n"
-            "/ejercicio - Recibir un ejercicio\n"
-            "/help - Ver esta ayuda"
-        )
+        send_message(chat_id, "Conversacion reiniciada!")
         return
 
     if text == "/ejercicio":
@@ -141,12 +129,11 @@ def handle_update(update):
 
 
 def main():
-    # Inicia el servidor web en un hilo separado
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
     print("Servidor web iniciado!")
+    print(f"Usando Gemini URL: {GEMINI_URL[:60]}...")
 
-    # Inicia el bot
     print("Bot iniciado!")
     offset = 0
 
