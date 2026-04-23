@@ -15,7 +15,6 @@ TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-# Voz americana natural y profesional
 VOICE_EN = "en-US-JennyNeural"
 
 SYSTEM_PROMPT = """Eres un tutor de inglés amigable, paciente y motivador llamado "Tutor AI". 
@@ -28,15 +27,6 @@ REGLAS:
 - Adapta el nivel al usuario (principiante, intermedio o avanzado).
 - Si hay error: ❌ Error → ✅ Correcto.
 - Mantén las respuestas concisas (máximo 200 palabras).
-
-MUY IMPORTANTE - Al final de CADA respuesta incluye siempre esta sección:
-🔊 AUDIO: [escribe aquí en inglés americano la frase o corrección completa que el usuario debe escuchar y practicar]
-
-Ejemplos de la sección AUDIO:
-- Si corregiste: 🔊 AUDIO: The correct way to say it is: I want to go to the store.
-- Si enseñaste vocabulario: 🔊 AUDIO: Here are today's words: apple, house, beautiful.
-- Si diste ejercicio: 🔊 AUDIO: Repeat after me: How are you doing today? I'm doing great, thank you!
-- Si el usuario habló bien: 🔊 AUDIO: Great job! You said it perfectly: I would like a cup of coffee, please.
 """
 
 user_histories = {}
@@ -81,58 +71,53 @@ def send_voice_file(chat_id, filepath):
         )
 
 
-async def text_to_speech_async(text, voice, output_path):
+async def tts_async(text, voice, output_path):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
 
 def speak_english(chat_id, text):
-    """Genera audio en inglés americano y lo envía."""
+    """Genera y envía audio en inglés americano."""
     try:
+        print(f"Generando audio para: {text}")
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
-        asyncio.run(text_to_speech_async(text, VOICE_EN, output_path))
+        asyncio.run(tts_async(text, VOICE_EN, output_path))
         send_voice_file(chat_id, output_path)
         os.unlink(output_path)
+        print("Audio enviado exitosamente")
     except Exception as e:
         print(f"Error en TTS: {e}")
 
 
-def extract_audio_phrase(reply):
-    """Extrae la frase en inglés marcada con 🔊 AUDIO: ..."""
-    match = re.search(r"🔊 AUDIO:\s*(.+)", reply)
-    if match:
-        return match.group(1).strip()
+def get_english_phrase(spanish_reply, user_input):
+    """Llama a Groq para obtener SOLO la frase en inglés que el usuario debe practicar."""
+    prompt = f"""A student said or wrote: "{user_input}"
+
+The tutor responded in Spanish: "{spanish_reply}"
+
+Based on this, write ONLY the English sentence or phrase the student should practice or that was corrected. 
+Write ONLY the English text, nothing else. No explanations, no Spanish, no punctuation before it.
+Maximum 2 sentences in English."""
+
+    response = requests.post(
+        GROQ_CHAT_URL,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 100
+        }
+    )
+    data = response.json()
+    if "choices" in data:
+        phrase = data["choices"][0]["message"]["content"].strip()
+        print(f"Frase en inglés para audio: {phrase}")
+        return phrase
     return None
-
-
-def transcribe_voice(file_id):
-    """Transcribe audio con Groq Whisper."""
-    try:
-        file_info = requests.get(f"{TELEGRAM_BASE}/getFile?file_id={file_id}").json()
-        file_path = file_info["result"]["file_path"]
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-        audio_data = requests.get(file_url).content
-
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
-            f.write(audio_data)
-            temp_path = f.name
-
-        with open(temp_path, "rb") as audio_file:
-            response = requests.post(
-                GROQ_WHISPER_URL,
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-                files={"file": ("audio.ogg", audio_file, "audio/ogg")},
-                data={"model": "whisper-large-v3", "language": "en"}
-            )
-        os.unlink(temp_path)
-
-        data = response.json()
-        print(f"Whisper: {data}")
-        return data.get("text", "")
-    except Exception as e:
-        print(f"Error transcribiendo: {e}")
-        return ""
 
 
 def ask_groq(history):
@@ -157,32 +142,60 @@ def ask_groq(history):
     return "Respuesta inesperada."
 
 
-def process_message(chat_id, user_id, text, is_voice=False):
+def transcribe_voice(file_id):
+    try:
+        file_info = requests.get(f"{TELEGRAM_BASE}/getFile?file_id={file_id}").json()
+        file_path = file_info["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
+        audio_data = requests.get(file_url).content
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
+            f.write(audio_data)
+            temp_path = f.name
+
+        with open(temp_path, "rb") as audio_file:
+            response = requests.post(
+                GROQ_WHISPER_URL,
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": ("audio.ogg", audio_file, "audio/ogg")},
+                data={"model": "whisper-large-v3", "language": "en"}
+            )
+        os.unlink(temp_path)
+        data = response.json()
+        print(f"Whisper: {data}")
+        return data.get("text", "")
+    except Exception as e:
+        print(f"Error transcribiendo: {e}")
+        return ""
+
+
+def process_message(chat_id, user_id, user_text, is_voice=False):
     if user_id not in user_histories:
         user_histories[user_id] = []
 
     history = user_histories[user_id]
 
     if is_voice:
-        content = f"[El usuario envió un mensaje de VOZ en inglés. Transcripción: '{text}']. Corrígelo si hay errores, felicítalo si estuvo bien."
+        content = f"[Mensaje de VOZ del usuario en inglés. Transcripción: '{user_text}']. Corrígelo si hay errores, felicítalo si estuvo bien."
     else:
-        content = text
+        content = user_text
 
     history.append({"role": "user", "content": content})
     send_typing(chat_id)
+
+    # 1. Obtener respuesta en español
     reply = ask_groq(history)
     history.append({"role": "assistant", "content": reply})
     user_histories[user_id] = history[-20:]
 
-    # Texto en español (sin la línea de AUDIO)
-    text_reply = re.sub(r"🔊 AUDIO:.*", "", reply).strip()
-    send_message(chat_id, text_reply)
+    # 2. Enviar texto en español
+    send_message(chat_id, reply)
 
-    # Audio en inglés americano
-    english_audio = extract_audio_phrase(reply)
-    if english_audio:
-        send_message(chat_id, "🇺🇸 Escucha la pronunciación:")
-        speak_english(chat_id, english_audio)
+    # 3. Obtener frase en inglés y enviar audio
+    english_phrase = get_english_phrase(reply, user_text)
+    if english_phrase:
+        send_message(chat_id, "🇺🇸 Escucha la pronunciación en inglés americano:")
+        speak_english(chat_id, english_phrase)
 
 
 def handle_update(update):
@@ -195,7 +208,7 @@ def handle_update(update):
 
     # Mensaje de VOZ
     if "voice" in message:
-        send_message(chat_id, "🎤 Escuché tu mensaje, analizando...")
+        send_message(chat_id, "🎤 Analizando tu pronunciación...")
         file_id = message["voice"]["file_id"]
         transcription = transcribe_voice(file_id)
 
@@ -220,29 +233,29 @@ def handle_update(update):
             "📝 Escribirme en espanol y te enseno como decirlo\n"
             "✍️ Escribirme en ingles y te corrijo los errores\n"
             "📚 Pedir ejercicios con /ejercicio\n\n"
-            "Escucharas la pronunciacion en ingles americano natural! 🔊\n\n"
+            "Siempre escucharas la pronunciacion correcta en ingles americano! 🔊\n\n"
             "Por donde quieres empezar? 😊"
         )
         return
 
     if text == "/reset":
         user_histories[user_id] = []
-        send_message(chat_id, "Conversacion reiniciada! Que quieres aprender hoy?")
+        send_message(chat_id, "Conversacion reiniciada!")
         return
 
     if text == "/help":
         send_message(chat_id,
-            "Comandos disponibles:\n\n"
-            "/start - Iniciar el bot\n"
+            "Comandos:\n"
+            "/start - Iniciar\n"
             "/reset - Borrar historial\n"
-            "/ejercicio - Recibir un ejercicio\n"
-            "/help - Ver esta ayuda\n\n"
-            "Tambien puedes enviarme mensajes de VOZ 🎤"
+            "/ejercicio - Recibir ejercicio\n"
+            "/help - Ver ayuda\n\n"
+            "Tambien puedes enviar mensajes de VOZ 🎤"
         )
         return
 
     if text == "/ejercicio":
-        text = "Dame un ejercicio corto y practico de ingles americano para practicar ahora."
+        text = "Dame un ejercicio corto de ingles americano para practicar ahora."
 
     process_message(chat_id, user_id, text, is_voice=False)
 
@@ -250,7 +263,7 @@ def handle_update(update):
 def main():
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    print("Bot iniciado con voz americana!")
+    print("Bot iniciado con audio en ingles americano!")
 
     offset = 0
     while True:
@@ -261,11 +274,9 @@ def main():
                 timeout=35
             )
             data = response.json()
-
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 handle_update(update)
-
         except Exception as e:
             print(f"Error: {e}")
             time.sleep(5)
