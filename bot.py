@@ -220,10 +220,10 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
 
     send_message(chat_id, reply)
 
-    english_phrase = get_english_phrase(reply, user_text)
-    if english_phrase:
-        send_message(chat_id, "🇺🇸 Pronunciación en inglés americano:")
-        speak_english(chat_id, english_phrase)
+    english_audio = get_english_audio(reply, user_text)
+    if english_audio:
+        send_message(chat_id, "🇺🇸 Tutor en inglés americano:")
+        speak_english(chat_id, english_audio)
 
 
 def handle_update(update):
