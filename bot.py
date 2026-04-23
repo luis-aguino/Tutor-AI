@@ -64,25 +64,41 @@ def send_typing(chat_id):
 
 def send_voice_file(chat_id, filepath):
     with open(filepath, "rb") as audio:
-        requests.post(
+        resp = requests.post(
             f"{TELEGRAM_BASE}/sendVoice",
             data={"chat_id": chat_id},
             files={"voice": audio}
         )
-
-
-async def tts_async(text, voice, output_path):
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(output_path)
+        print(f"sendVoice response: {resp.status_code} {resp.text[:200]}")
 
 
 def speak_english(chat_id, text):
-    """Genera y envía audio en inglés americano."""
+    """Genera y envía audio en inglés americano usando un hilo separado."""
     try:
         print(f"Generando audio para: {text}")
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
-        asyncio.run(tts_async(text, VOICE_EN, output_path))
+
+        result = {"error": None}
+
+        def run_tts():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(
+                    edge_tts.Communicate(text, VOICE_EN).save(output_path)
+                )
+                loop.close()
+            except Exception as e:
+                result["error"] = e
+
+        tts_thread = threading.Thread(target=run_tts)
+        tts_thread.start()
+        tts_thread.join(timeout=30)
+
+        if result["error"]:
+            raise result["error"]
+
         send_voice_file(chat_id, output_path)
         os.unlink(output_path)
         print("Audio enviado exitosamente")
@@ -91,21 +107,15 @@ def speak_english(chat_id, text):
 
 
 def get_english_phrase(spanish_reply, user_input):
-    """Llama a Groq para obtener SOLO la frase en inglés que el usuario debe practicar."""
+    """Obtiene la frase en inglés que el usuario debe practicar."""
     prompt = f"""A student said or wrote: "{user_input}"
-
 The tutor responded in Spanish: "{spanish_reply}"
 
-Based on this, write ONLY the English sentence or phrase the student should practice or that was corrected. 
-Write ONLY the English text, nothing else. No explanations, no Spanish, no punctuation before it.
-Maximum 2 sentences in English."""
+Write ONLY the English sentence the student should practice. No explanations, no Spanish. Just the English sentence."""
 
     response = requests.post(
         GROQ_CHAT_URL,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        },
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
         json={
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
@@ -115,7 +125,7 @@ Maximum 2 sentences in English."""
     data = response.json()
     if "choices" in data:
         phrase = data["choices"][0]["message"]["content"].strip()
-        print(f"Frase en inglés para audio: {phrase}")
+        print(f"Frase inglés: {phrase}")
         return phrase
     return None
 
@@ -124,22 +134,13 @@ def ask_groq(history):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
     response = requests.post(
         GROQ_CHAT_URL,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": messages,
-            "max_tokens": 500
-        }
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={"model": "llama-3.3-70b-versatile", "messages": messages, "max_tokens": 500}
     )
     data = response.json()
     if "choices" in data:
         return data["choices"][0]["message"]["content"]
-    elif "error" in data:
-        return f"Error: {data['error'].get('message', 'Error desconocido')}"
-    return "Respuesta inesperada."
+    return "Error al obtener respuesta."
 
 
 def transcribe_voice(file_id):
@@ -174,24 +175,18 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
         user_histories[user_id] = []
 
     history = user_histories[user_id]
-
-    if is_voice:
-        content = f"[Mensaje de VOZ del usuario en inglés. Transcripción: '{user_text}']. Corrígelo si hay errores, felicítalo si estuvo bien."
-    else:
-        content = user_text
-
+    content = f"[Mensaje de VOZ. Transcripción: '{user_text}']. Corrígelo si hay errores." if is_voice else user_text
     history.append({"role": "user", "content": content})
-    send_typing(chat_id)
 
-    # 1. Obtener respuesta en español
+    send_typing(chat_id)
     reply = ask_groq(history)
     history.append({"role": "assistant", "content": reply})
     user_histories[user_id] = history[-20:]
 
-    # 2. Enviar texto en español
+    # Texto en español
     send_message(chat_id, reply)
 
-    # 3. Obtener frase en inglés y enviar audio
+    # Audio en inglés americano
     english_phrase = get_english_phrase(reply, user_text)
     if english_phrase:
         send_message(chat_id, "🇺🇸 Escucha la pronunciación en inglés americano:")
@@ -206,12 +201,9 @@ def handle_update(update):
     chat_id = message["chat"]["id"]
     user_id = str(chat_id)
 
-    # Mensaje de VOZ
     if "voice" in message:
         send_message(chat_id, "🎤 Analizando tu pronunciación...")
-        file_id = message["voice"]["file_id"]
-        transcription = transcribe_voice(file_id)
-
+        transcription = transcribe_voice(message["voice"]["file_id"])
         if transcription:
             send_message(chat_id, f"📝 Escuché: {transcription}")
             process_message(chat_id, user_id, transcription, is_voice=True)
@@ -219,7 +211,6 @@ def handle_update(update):
             send_message(chat_id, "No pude entender el audio. Intenta de nuevo.")
         return
 
-    # Mensaje de TEXTO
     text = message.get("text", "")
     if not text:
         return
@@ -233,7 +224,7 @@ def handle_update(update):
             "📝 Escribirme en espanol y te enseno como decirlo\n"
             "✍️ Escribirme en ingles y te corrijo los errores\n"
             "📚 Pedir ejercicios con /ejercicio\n\n"
-            "Siempre escucharas la pronunciacion correcta en ingles americano! 🔊\n\n"
+            "Siempre escucharas la pronunciacion en ingles americano! 🔊\n\n"
             "Por donde quieres empezar? 😊"
         )
         return
@@ -249,8 +240,7 @@ def handle_update(update):
             "/start - Iniciar\n"
             "/reset - Borrar historial\n"
             "/ejercicio - Recibir ejercicio\n"
-            "/help - Ver ayuda\n\n"
-            "Tambien puedes enviar mensajes de VOZ 🎤"
+            "/help - Ver ayuda"
         )
         return
 
@@ -261,8 +251,7 @@ def handle_update(update):
 
 
 def main():
-    thread = threading.Thread(target=run_server, daemon=True)
-    thread.start()
+    threading.Thread(target=run_server, daemon=True).start()
     print("Bot iniciado con audio en ingles americano!")
 
     offset = 0
@@ -273,8 +262,7 @@ def main():
                 params={"offset": offset, "timeout": 30},
                 timeout=35
             )
-            data = response.json()
-            for update in data.get("result", []):
+            for update in response.json().get("result", []):
                 offset = update["update_id"] + 1
                 handle_update(update)
         except Exception as e:
