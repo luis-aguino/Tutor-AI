@@ -302,14 +302,17 @@ def get_start_offset():
 
 
 def keepalive():
-    """Hace ping al propio servidor cada 5 minutos para evitar que Render lo congele."""
-    port = os.environ.get("PORT", "8080")
-    url = f"http://0.0.0.0:{port}/"
+    """Hace ping a la URL publica de Render cada 5 minutos para evitar congelamiento."""
+    # Render provee esta variable automaticamente con la URL publica del servicio
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        print("RENDER_EXTERNAL_URL no definida, keepalive desactivado")
+        return
     while True:
         try:
-            time.sleep(300)  # cada 5 minutos
-            requests.get(url, timeout=10)
-            print("Keepalive ping OK")
+            time.sleep(270)  # cada 4.5 minutos (Render congela a los 5 min)
+            resp = requests.get(render_url, timeout=10)
+            print(f"Keepalive ping OK: {resp.status_code}")
         except Exception as e:
             print(f"Keepalive error: {e}")
 
