@@ -108,7 +108,7 @@ def speak_english(chat_id, text):
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
 
-        tts = gTTS(text=clean, lang="en", tld="us", slow=False)
+        tts = gTTS(text=clean, lang="en", tld="com", slow=False)
         tts.save(output_path)
 
         size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
